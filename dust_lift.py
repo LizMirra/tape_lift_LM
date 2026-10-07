@@ -3,15 +3,20 @@ Dust-on-tape particle analysis for microscope JPGs that don't carry
 embedded scale metadata.
 
 Unlike tape_lift.py, this does NOT ask you to specify a surface type
-(metal/painted). 
+(metal/painted).
 
 Workflow per image:
 1. Read the JPG's pixel dimensions.
 2. Crop off the ruler strip (and anything else) from the top/bottom.
 3. Compute micrometers-per-pixel from a manually supplied ruler
    measurement, or use a value you already know.
-4. Detect particles automatically (Otsu threshold + minority-class
-   assumption -- see particle_detector.py for details).
+4. Detect particles automatically (contrast-deviation threshold -- see
+   particle_detector.py for details). By default, "background" means this
+   image's own median brightness. You can instead point -background-img
+   at a clean reference photo of the same tape (no dust), taken from the
+   same camera position, and each pixel gets compared against that
+   photo's brightness at the same spot -- more precise if the lighting
+   isn't perfectly even across the frame.
 5. Convert pixel measurements to micrometers.
 6. Draw a labeled overlay image.
 7. Bin particles by size and compare against specification.csv (same
@@ -23,6 +28,10 @@ Example:
 
     (crops 60px off the top for the ruler strip, and calibrates using a
     5.0mm ruler span that measured 812px wide in the image)
+
+Example with a background reference photo:
+    python dust_lift.py -img sample1.jpg -save results/ \\
+        -crop-top 60 -ruler 5.0 812 -background-img clean_tape.jpg
 """
 import os
 import argparse
@@ -33,7 +42,7 @@ from matplotlib.patches import Patch
 from PIL import Image
 
 from scale_calibration import get_image_dimensions, compute_scale, compute_scale_from_full_width
-from particle_detector import load_grayscale, segment_particles, measure_particles
+from particle_detector import load_grayscale, load_background, segment_particles, measure_particles
 from particle_size_converter import ParticleSizeConverter
 from overlay_and_label import ParticleOverlay
 
@@ -51,7 +60,7 @@ def crop_ruler(image_path, crop_top=0, crop_bottom=0):
 
 
 def analyze_image(image_path, save_location, scale_mode, scale_value, crop_top, crop_bottom,
-                   spec_path='specification.csv', min_particle_size=4):
+                   spec_path='specification.csv', min_particle_size=4, background_image_path=None):
 
     file_name = os.path.splitext(os.path.basename(image_path))[0]
     out_dir = os.path.join(save_location, file_name)
@@ -71,9 +80,28 @@ def analyze_image(image_path, save_location, scale_mode, scale_value, crop_top, 
     cropped_path, (cropped_w, cropped_h) = crop_ruler(image_path, crop_top, crop_bottom)
     print(f"Cropped image size (ruler removed): {cropped_w} x {cropped_h} px")
 
+    # --- Optional background reference photo (cropped the same way, so
+    #     it lines up pixel-for-pixel with the image being analyzed) ---
+    background = None
+    cropped_bg_path = None
+    if background_image_path is not None:
+        cropped_bg_path, (bg_w, bg_h) = crop_ruler(background_image_path, crop_top, crop_bottom)
+        if (bg_w, bg_h) != (cropped_w, cropped_h):
+            if os.path.exists(cropped_bg_path):
+                os.remove(cropped_bg_path)
+            if os.path.exists(cropped_path):
+                os.remove(cropped_path)
+            raise ValueError(
+                f"Background image '{background_image_path}' is {bg_w}x{bg_h} after cropping, "
+                f"but '{image_path}' is {cropped_w}x{cropped_h}. They need to match -- use a "
+                f"background photo taken at the same resolution and camera position."
+            )
+        background = load_background(cropped_bg_path, blur_sigma=1.0)
+        print(f"Using background reference: {background_image_path}")
+
     # --- Particle detection (automatic contrast, no surface type) ---
     gray = load_grayscale(cropped_path)
-    particle_mask = segment_particles(gray, min_size=min_particle_size)
+    particle_mask = segment_particles(gray, min_size=min_particle_size, background=background)
     df = measure_particles(particle_mask, intensity_image=gray)
 
     if len(df) == 0:
@@ -104,6 +132,8 @@ def analyze_image(image_path, save_location, scale_mode, scale_value, crop_top, 
 
     if os.path.exists(cropped_path):
         os.remove(cropped_path)
+    if cropped_bg_path is not None and os.path.exists(cropped_bg_path):
+        os.remove(cropped_bg_path)
 
     # --- Bin by size and compare to specification ---
     df_spec = pd.read_csv(spec_path)
@@ -164,6 +194,15 @@ def main():
     parser.add_argument('-crop-bottom', type=int, default=0, help='Pixels to crop off the bottom')
     parser.add_argument('-min-size', type=int, default=4,
                         help='Minimum particle size in pixels; raise this if noise is being counted as particles')
+    parser.add_argument('-background-img', default=None,
+                        help='Optional path to a clean reference photo of the same tape with no dust '
+                             'on it, taken from the same camera position. When given, particles are '
+                             'detected by comparing each pixel against this photo\'s brightness at the '
+                             'same position, instead of this image\'s own median brightness. The '
+                             'reference is cropped with the same -crop-top/-crop-bottom as the image '
+                             'being analyzed, so it must match in resolution and framing. If omitted '
+                             '(default), detection works exactly as before, using the analyzed image '
+                             'itself to estimate the background.')
 
     scale_group = parser.add_mutually_exclusive_group(required=True)
     scale_group.add_argument('-scale-um-per-px', type=float,
@@ -201,7 +240,8 @@ def main():
             print(f"Skipping {path}: must be a JPG")
             continue
         analyze_image(path, args.SaveLocation, scale_mode, scale_value, args.crop_top, args.crop_bottom,
-                     spec_path=args.Specification, min_particle_size=args.min_size)
+                     spec_path=args.Specification, min_particle_size=args.min_size,
+                     background_image_path=args.background_img)
 
 
 if __name__ == '__main__':

@@ -1,16 +1,23 @@
 """
 Detect particles on a tape-lift image by contrast, automatically -- no need
-to know in advance whether the background is light or dark 
+to know in advance whether the background is light or dark
 
 Approach:
 1. Grayscale + light Gaussian blur (reduces sensor noise so it isn't
    picked up as fake particles).
-2. Estimate the background brightness as the image's median gray value.
-   The median is robust to outliers, so as long as dust covers well under
-   half the image, it lands on the tape's own brightness rather than
-   being skewed by the dust.
+2. Estimate the background brightness.
+   - By default, this is the image's own median gray value (a single
+     scalar). The median is robust to outliers, so as long as dust covers
+     well under half the image, it lands on the tape's own brightness
+     rather than being skewed by the dust.
+   - Optionally, a separate clean reference photo of the same tape (no
+     dust on it) can be supplied instead, smoothed the same way, and used
+     as a per-pixel background estimate. This is more precise when the
+     tape's lighting isn't perfectly even, since each pixel is compared
+     against the background's actual brightness at that exact spot
+     instead of one global number.
 3. Build a "deviation" image: how far each pixel's brightness is from
-   that background level, regardless of direction. This is the key
+   the background level, regardless of direction. This is the key
    difference from a plain Otsu split -- it treats a particle darker than
    the tape and a particle lighter than the tape as the *same kind of
    anomaly*, so both are caught in one pass instead of needing separate
@@ -39,7 +46,19 @@ def load_grayscale(image_path):
     return np.array(img)
 
 
-def segment_particles(gray, min_size=4, blur_sigma=1.0):
+def load_background(image_path, blur_sigma=1.0):
+    """
+    Load a clean reference (background-only, no dust) image and smooth it
+    the same way segment_particles smooths the image being analyzed, so
+    the two are directly comparable pixel-for-pixel.
+
+    Returns a 2D float array the same shape as the reference image.
+    """
+    gray = load_grayscale(image_path)
+    return filters.gaussian(gray, sigma=blur_sigma, preserve_range=True)
+
+
+def segment_particles(gray, min_size=4, blur_sigma=1.0, background=None):
     """
     Returns a boolean mask the same shape as `gray`, True where a particle
     was detected. Catches particles both darker AND lighter than the
@@ -49,11 +68,29 @@ def segment_particles(gray, min_size=4, blur_sigma=1.0):
               noise -- raise this if you're getting speckle false positives,
               lower it if you're missing genuinely small dust.
     blur_sigma: Gaussian blur strength applied before thresholding.
+    background: optional 2D array, same shape as `gray`, giving a
+              per-pixel background brightness estimate -- typically the
+              output of load_background() on a clean reference photo of
+              the same tape with no dust on it. When given, each pixel is
+              compared against the background's brightness at that exact
+              position instead of one global median, which is more
+              precise under uneven lighting. When None (the default),
+              falls back to the original behavior: the image's own median
+              brightness is used as a single background level.
     """
     smoothed = filters.gaussian(gray, sigma=blur_sigma, preserve_range=True)
 
-    background_level = np.median(smoothed)
-    deviation = np.abs(smoothed - background_level)
+    if background is None:
+        background_level = np.median(smoothed)
+        deviation = np.abs(smoothed - background_level)
+    else:
+        if background.shape != smoothed.shape:
+            raise ValueError(
+                f"Background reference image shape {background.shape} doesn't match "
+                f"the analyzed image's cropped shape {smoothed.shape} -- they need to "
+                f"be the same size (crop both the same way, from the same camera position)."
+            )
+        deviation = np.abs(smoothed - background)
 
     dev_thresh = filters.threshold_otsu(deviation)
     particle_mask = deviation > dev_thresh
