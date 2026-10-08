@@ -1,29 +1,39 @@
 """
-Detect particles on a tape-lift image by contrast, automatically -- no need
-to know in advance whether the background is light or dark
+Detect particles on a tape-lift image by contrast
 
-Approach:
-1. Grayscale + light Gaussian blur (reduces sensor noise so it isn't
-   picked up as fake particles).
-2. Estimate the background brightness.
-   - By default, this is the image's own median gray value (a single
-     scalar). The median is robust to outliers, so as long as dust covers
-     well under half the image, it lands on the tape's own brightness
-     rather than being skewed by the dust.
-   - Optionally, a separate clean reference photo of the same tape (no
-     dust on it) can be supplied instead, smoothed the same way, and used
-     as a per-pixel background estimate. This is more precise when the
-     tape's lighting isn't perfectly even, since each pixel is compared
-     against the background's actual brightness at that exact spot
-     instead of one global number.
-3. Build a "deviation" image: how far each pixel's brightness is from
-   the background level, regardless of direction. This is the key
-   difference from a plain Otsu split -- it treats a particle darker than
-   the tape and a particle lighter than the tape as the *same kind of
-   anomaly*, so both are caught in one pass instead of needing separate
-   dark/light thresholds like the old "painted" surface case did.
-4. Otsu's method is applied to that deviation image to automatically pick
-   how much deviation counts as "particle" vs "background noise/texture".
+This replaced an earlier version that used a single global median brightness
+and Otsu's method. That broke down on real photos with uneven illumination
+(soft out-of-focus blotches, vignetting): Otsu assumes the pixel-deviation
+histogram is clearly two-humped (background vs particle), but real photos
+like these are mostly continuous low-contrast texture with a few sharp
+particles buried in it, so Otsu picked a threshold sitting almost entirely
+inside the noise floor and flagged 30-45% of the image as "particles."
+
+Approach now:
+1. Grayscale + light Gaussian blur (blur_sigma) to suppress sensor/JPEG
+   noise before anything else.
+2. Estimate the local background brightness at every pixel.
+   - Default (background=None): a heavy Gaussian blur of the image itself
+     (local_bg_sigma, default 120px) standing in for "what this patch of
+     tape would look like with no dust on it." Because the blur radius is
+     large relative to real dust (which is small and sharp), genuine
+     particles survive as a residual after subtracting this blurred
+     version, while gradual lighting changes and big soft out-of-focus
+     blobs get absorbed into the estimate and subtracted away cleanly.
+     This needs no second photo and adapts per-image.
+   - Optional (background=<array>): a separate clean reference photo
+     (see load_background()), used directly as the per-pixel background
+     instead of self-blurring. Only better than the default if that
+     reference is both pixel-aligned and genuinely free of debris --
+     otherwise the self-blur default is more robust.
+3. Build a signed deviation image: smoothed - background_estimate.
+4. Threshold deviation using a robust statistic instead of Otsu: the
+   median absolute deviation (MAD) of the deviation image, scaled to
+   behave like a standard deviation (x1.4826) and then multiplied by
+   `sensitivity` (default 6 -- i.e. "6 robust-sigma away from zero counts
+   as a particle"). MAD is far less thrown off by a having a few genuinely
+   large particles or a non-bimodal histogram than Otsu is, which is why
+   it holds up on real noisy data where Otsu didn't.
 5. Small speckle noise is removed and small holes inside particles are
    filled, then connected components are labeled and measured.
 
@@ -53,12 +63,20 @@ def load_background(image_path, blur_sigma=1.0):
     the two are directly comparable pixel-for-pixel.
 
     Returns a 2D float array the same shape as the reference image.
+
+    Note: this only helps if the reference photo is itself free of debris
+    and pixel-aligned with the image being analyzed (same camera position,
+    same resolution). If you're not sure your reference is clean, leave
+    `background` as None in segment_particles and let it estimate the
+    local background from the image itself instead -- that's usually more
+    robust in practice.
     """
     gray = load_grayscale(image_path)
     return filters.gaussian(gray, sigma=blur_sigma, preserve_range=True)
 
 
-def segment_particles(gray, min_size=4, blur_sigma=1.0, background=None):
+def segment_particles(gray, min_size=4, blur_sigma=1.0, background=None,
+                       local_bg_sigma=120, sensitivity=6.0):
     """
     Returns a boolean mask the same shape as `gray`, True where a particle
     was detected. Catches particles both darker AND lighter than the
@@ -67,22 +85,34 @@ def segment_particles(gray, min_size=4, blur_sigma=1.0, background=None):
     min_size: particles smaller than this many pixels are discarded as
               noise -- raise this if you're getting speckle false positives,
               lower it if you're missing genuinely small dust.
-    blur_sigma: Gaussian blur strength applied before thresholding.
-    background: optional 2D array, same shape as `gray`, giving a
-              per-pixel background brightness estimate -- typically the
-              output of load_background() on a clean reference photo of
-              the same tape with no dust on it. When given, each pixel is
-              compared against the background's brightness at that exact
-              position instead of one global median, which is more
-              precise under uneven lighting. When None (the default),
-              falls back to the original behavior: the image's own median
-              brightness is used as a single background level.
+    blur_sigma: Gaussian blur strength applied before anything else, to
+              suppress sensor/JPEG noise. Default 1.0.
+    background: optional 2D array, same shape as `gray` -- a per-pixel
+              background estimate, typically the output of
+              load_background() on a clean reference photo. When given,
+              it's used as-is instead of estimating the background from
+              `gray` itself. When None (the default), the background is
+              estimated by heavily blurring `gray` -- see module docstring.
+    local_bg_sigma: only used when background is None. How large a blur
+              radius to use for the self-estimated background, in pixels.
+              Must be large relative to real particle size so particles
+              aren't blurred into the "background" themselves, but small
+              enough to track genuine large-scale lighting changes across
+              the frame. Default 120 -- raise it if large particles are
+              being partly absorbed into the background estimate (visible
+              as a faint ring at the particle's edge instead of a solid
+              outline); lower it if lighting changes faster than that
+              across the frame.
+    sensitivity: how many robust standard deviations away from zero a
+              pixel's deviation must be to count as a particle. Higher =
+              stricter (fewer false positives, may miss faint dust).
+              Lower = more sensitive (catches fainter dust, more false
+              positives from residual noise/texture). Default 6.0.
     """
     smoothed = filters.gaussian(gray, sigma=blur_sigma, preserve_range=True)
 
     if background is None:
-        background_level = np.median(smoothed)
-        deviation = np.abs(smoothed - background_level)
+        bg_estimate = filters.gaussian(smoothed, sigma=local_bg_sigma, preserve_range=True)
     else:
         if background.shape != smoothed.shape:
             raise ValueError(
@@ -90,10 +120,18 @@ def segment_particles(gray, min_size=4, blur_sigma=1.0, background=None):
                 f"the analyzed image's cropped shape {smoothed.shape} -- they need to "
                 f"be the same size (crop both the same way, from the same camera position)."
             )
-        deviation = np.abs(smoothed - background)
+        bg_estimate = background
 
-    dev_thresh = filters.threshold_otsu(deviation)
-    particle_mask = deviation > dev_thresh
+    deviation = smoothed - bg_estimate  # signed: negative = darker than background, positive = lighter
+
+    robust_std = np.median(np.abs(deviation - np.median(deviation))) * 1.4826
+    if robust_std == 0:
+        # Degenerate case (perfectly flat image) -- avoid a zero threshold
+        # flagging every pixel with any noise at all.
+        robust_std = 1e-6
+    dev_thresh = sensitivity * robust_std
+
+    particle_mask = np.abs(deviation) > dev_thresh
 
     particle_mask = morphology.remove_small_objects(particle_mask, min_size=min_size)
     particle_mask = ndi.binary_fill_holes(particle_mask)

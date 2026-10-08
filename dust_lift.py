@@ -60,7 +60,8 @@ def crop_ruler(image_path, crop_top=0, crop_bottom=0):
 
 
 def analyze_image(image_path, save_location, scale_mode, scale_value, crop_top, crop_bottom,
-                   spec_path='specification.csv', min_particle_size=4, background_image_path=None):
+                   spec_path='specification.csv', min_particle_size=4, background_image_path=None,
+                   local_bg_sigma=120, sensitivity=6.0):
 
     file_name = os.path.splitext(os.path.basename(image_path))[0]
     out_dir = os.path.join(save_location, file_name)
@@ -101,7 +102,8 @@ def analyze_image(image_path, save_location, scale_mode, scale_value, crop_top, 
 
     # --- Particle detection (automatic contrast, no surface type) ---
     gray = load_grayscale(cropped_path)
-    particle_mask = segment_particles(gray, min_size=min_particle_size, background=background)
+    particle_mask = segment_particles(gray, min_size=min_particle_size, background=background,
+                                       local_bg_sigma=local_bg_sigma, sensitivity=sensitivity)
     df = measure_particles(particle_mask, intensity_image=gray)
 
     if len(df) == 0:
@@ -196,13 +198,25 @@ def main():
                         help='Minimum particle size in pixels; raise this if noise is being counted as particles')
     parser.add_argument('-background-img', default=None,
                         help='Optional path to a clean reference photo of the same tape with no dust '
-                             'on it, taken from the same camera position. When given, particles are '
-                             'detected by comparing each pixel against this photo\'s brightness at the '
-                             'same position, instead of this image\'s own median brightness. The '
-                             'reference is cropped with the same -crop-top/-crop-bottom as the image '
-                             'being analyzed, so it must match in resolution and framing. If omitted '
-                             '(default), detection works exactly as before, using the analyzed image '
-                             'itself to estimate the background.')
+                             'on it, taken from the same camera position, pixel-aligned. When given, '
+                             'particles are detected by comparing each pixel against this photo\'s '
+                             'brightness at the same position. Only use this if your reference is '
+                             'genuinely clean and aligned -- otherwise leave it out (default) and let '
+                             'detection estimate the background from the image itself, which is more '
+                             'robust in most real cases (handles uneven lighting with no second photo '
+                             'needed).')
+    parser.add_argument('-bg-sigma', type=float, default=120,
+                        help='Only used when -background-img is NOT given. Blur radius (pixels) for '
+                             'the self-estimated local background. Must be large relative to real '
+                             'particle size. Raise it if large particles show a faint ring at their '
+                             'edge instead of a solid outline (the blur is too small to fully absorb '
+                             'them into the background estimate); lower it if lighting changes faster '
+                             'than that across the frame. Default 120.')
+    parser.add_argument('-sensitivity', type=float, default=6.0,
+                        help='How many robust standard deviations of brightness deviation count as a '
+                             'particle. Higher = stricter (fewer false positives, may miss faint dust). '
+                             'Lower = more sensitive (catches fainter dust, more false positives from '
+                             'noise/texture). Default 6.0.')
 
     scale_group = parser.add_mutually_exclusive_group(required=True)
     scale_group.add_argument('-scale-um-per-px', type=float,
@@ -241,7 +255,8 @@ def main():
             continue
         analyze_image(path, args.SaveLocation, scale_mode, scale_value, args.crop_top, args.crop_bottom,
                      spec_path=args.Specification, min_particle_size=args.min_size,
-                     background_image_path=args.background_img)
+                     background_image_path=args.background_img,
+                     local_bg_sigma=args.bg_sigma, sensitivity=args.sensitivity)
 
 
 if __name__ == '__main__':
