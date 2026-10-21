@@ -34,6 +34,7 @@ Example with a background reference photo:
         -crop-top 60 -ruler 5.0 812 -background-img clean_tape.jpg
 """
 import os
+import csv
 import argparse
 import numpy as np
 import pandas as pd
@@ -116,15 +117,47 @@ def analyze_image(image_path, save_location, scale_mode, scale_value, crop_top, 
     else:
         print(f"Detected {len(df)} particles.")
 
-    raw_csv_path = os.path.join(out_dir, f"{file_name}_particle_count.csv")
-    df.to_csv(raw_csv_path)
-
     # --- Convert to real-world units ---
     converter = ParticleSizeConverter(scale_um_per_pixel)
     df_sizes = converter.convert(df)
+    image_area_cm2 = converter.image_area_cm2(cropped_w, cropped_h)
+
+    # --- Save ONE csv: run info as "# key,value" lines at the top, then one row per particle ---
+    # (The pixel columns and the um columns used to live in two separate files; the sized
+    #  table already contains everything in the raw one.)
+    if scale_mode == 'full_width':
+        scale_source = f"full image width = {scale_value} mm across {width_px} px"
+    else:
+        scale_source = "set directly (-scale-um-per-px or -ruler)"
+    used_bg = background_image_path is not None
+    metadata = [
+        ('image_file', os.path.basename(image_path)),
+        ('original_width_px', width_px),
+        ('original_height_px', height_px),
+        ('crop_top_px', crop_top),
+        ('crop_bottom_px', crop_bottom),
+        ('analyzed_width_px', cropped_w),
+        ('analyzed_height_px', cropped_h),
+        ('scale_um_per_px', f"{scale_um_per_pixel:.6f}"),
+        ('scale_source', scale_source),
+        ('analyzed_width_mm', f"{cropped_w * scale_um_per_pixel / 1000:.4f}"),
+        ('analyzed_height_mm', f"{cropped_h * scale_um_per_pixel / 1000:.4f}"),
+        ('analyzed_area_cm2', f"{image_area_cm2:.6f}"),
+        ('min_size_px', min_particle_size),
+        ('sensitivity', sensitivity),
+        ('bg_sigma_px', f"{local_bg_sigma} (not used: background image given)" if used_bg
+                        else local_bg_sigma),
+        ('background_image_used', 'yes' if used_bg else 'no'),
+        ('background_image', os.path.basename(background_image_path) if used_bg else 'none'),
+        ('particle_count', len(df_sizes)),
+    ]
     sized_csv_path = os.path.join(out_dir, f"{file_name}_particle_count_with_sizes.csv")
-    df_sizes.to_csv(sized_csv_path)
-    print(f"Saved sized particle data to: {sized_csv_path}")
+    with open(sized_csv_path, 'w', newline='') as f:
+        writer = csv.writer(f, lineterminator=os.linesep)
+        for key, value in metadata:
+            writer.writerow([f"# {key}", value])
+        df_sizes.to_csv(f)
+    print(f"Saved particle data + run settings to: {sized_csv_path}")
 
     # --- Overlay + labels ---
     overlay_path = os.path.join(out_dir, f"{file_name}_overlay_labeled.png")
@@ -154,7 +187,6 @@ def analyze_image(image_path, save_location, scale_mode, scale_value, crop_top, 
             bin_labels.append(f"{diameters[i - 1]} - {diameters[i]} um")
     bin_labels.append(f"> {diameters[-1]} um")
 
-    image_area_cm2 = converter.image_area_cm2(cropped_w, cropped_h)
     counts_per_cm2 = np.array(bin_counts) / image_area_cm2
 
     spec_counts = np.array(df_spec["Allowed_particle_count(counts/cm^2 for 500ng/cm^2)"])

@@ -133,7 +133,12 @@ def segment_particles(gray, min_size=4, blur_sigma=1.0, background=None,
 
     particle_mask = np.abs(deviation) > dev_thresh
 
-    particle_mask = morphology.remove_small_objects(particle_mask, min_size=min_size)
+    # scikit-image 0.26+ renamed min_size -> max_size (and now removes objects <= max_size),
+    # so pass min_size - 1 there to keep the same behaviour; older versions use min_size.
+    try:
+        particle_mask = morphology.remove_small_objects(particle_mask, max_size=min_size - 1)
+    except TypeError:
+        particle_mask = morphology.remove_small_objects(particle_mask, min_size=min_size)
     particle_mask = ndi.binary_fill_holes(particle_mask)
 
     return particle_mask

@@ -1,0 +1,20 @@
+# image_file,IMG00186.JPG
+# original_width_px,3264
+# original_height_px,1840
+# crop_top_px,0
+# crop_bottom_px,0
+# analyzed_width_px,3264
+# analyzed_height_px,1840
+# scale_um_per_px,8.272059
+# scale_source,full image width = 27.0 mm across 3264 px
+# analyzed_width_mm,27.0000
+# analyzed_height_mm,15.2206
+# analyzed_area_cm2,4.109559
+# min_size_px,4
+# sensitivity,15.0
+# bg_sigma_px,120 (not used: background image given)
+# background_image_used,yes
+# background_image,IMG00184.JPG
+# particle_count,1
+,Area,Major,Minor,Feret,MinFeret,CentroidX,CentroidY,Area_um2,Major_um,Minor_um,Feret_um,MinFeret_um,Diameter_um
+1,4.0,2.0,2.0,2.23606797749979,2.0,3127.5,1137.5,273.7078287197231,16.544117647058822,16.544117647058822,18.496885843288702,16.544117647058822,18.668045575031833
